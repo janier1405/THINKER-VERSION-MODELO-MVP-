@@ -1,0 +1,81 @@
+# PRODUCCIÓN. Orden: db -> migrate (propietario) -> roles (propietario) -> api (tb_app) -> proxy.
+# Antes: bash scripts/gen_secrets.sh; copiar certificados a secrets/tls_fullchain y secrets/tls_privkey; chmod +x db/init/01-owner.sh
+# Verificado en el entorno de desarrollo: migraciones, pg_roles.sql, verify_least_privilege.py y copia/restauración contra PostgreSQL 16.
+# NO verificado aquí: este compose en Docker, el proxy con TLS real y el build de las imágenes (no hay Docker en ese entorno).
+services:
+  db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: tb_boot, POSTGRES_DB: postgres, POSTGRES_PASSWORD_FILE: /run/secrets/pg_super_password }
+    secrets: [pg_super_password, pg_owner_password]
+    volumes: [pgdata:/var/lib/postgresql/data, "./db/init:/docker-entrypoint-initdb.d:ro"]
+    networks: [internal]
+    restart: always
+    healthcheck: { test: ["CMD-SHELL","pg_isready -U tb_owner -d thinkerbell"], interval: 5s, timeout: 3s, retries: 20 }
+  migrate:
+    build: .
+    command: ["alembic","upgrade","head"]
+    environment: { APP_ENV: production, DATABASE_URL_FILE: /run/secrets/database_url_owner }
+    secrets: [database_url_owner]
+    depends_on: { db: { condition: service_healthy } }
+    networks: [internal]
+    restart: "no"
+  roles:
+    image: postgres:16-alpine
+    entrypoint: ["sh","-c"]
+    command: ["PGPASSWORD=$$(cat /run/secrets/pg_owner_password) exec psql -h db -U tb_owner -d thinkerbell -v ON_ERROR_STOP=1 -v db=thinkerbell -f /scripts/pg_roles.sql"]
+    volumes: ["./scripts/pg_roles.sql:/scripts/pg_roles.sql:ro"]
+    secrets: [pg_owner_password, tb_app_password, tb_backup_password]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+    networks: [internal]
+    restart: "no"
+  api:
+    build: .
+    environment:
+      APP_ENV: production
+      COOKIE_SECURE: "true"
+      DATABASE_URL_FILE: /run/secrets/database_url_app
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      AUDIT_HMAC_KEY_FILE: /run/secrets/audit_hmac_key
+      CORS_ORIGINS: "${CORS_ORIGINS:?define CORS_ORIGINS (p. ej. https://tu-dominio)}"
+    secrets: [database_url_app, jwt_secret, audit_hmac_key]
+    depends_on: { roles: { condition: service_completed_successfully } }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal]
+    restart: always
+  proxy:
+    build: { context: ., dockerfile: Dockerfile.proxy }
+    ports: ["443:8443", "80:8080"]
+    secrets: [tls_fullchain, tls_privkey]
+    depends_on: { api: { condition: service_healthy } }
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [internal, edge]
+    restart: always
+    healthcheck: { test: ["CMD","wget","-qO-","http://127.0.0.1:8080/nginx-health"], interval: 10s, timeout: 3s, retries: 5 }
+  ops:                              # docker compose --profile ops run --rm ops backup.sh /backups/x.dump.gpg
+    build: { context: ., dockerfile: Dockerfile.ops }
+    profiles: ["ops"]
+    environment: { PGHOST: db, PGDATABASE: thinkerbell, PGUSER: tb_backup, PGPASSWORD_FILE: /run/secrets/tb_backup_password, GNUPGHOME: /gnupg,
+                   BACKUP_RECIPIENT: "${BACKUP_RECIPIENT:-}", BACKUP_SIGNING_KEY: "${BACKUP_SIGNING_KEY:-}" }
+    secrets: [tb_backup_password]
+    volumes: ["./backups:/backups", "./ops/gnupg:/gnupg"]
+    depends_on: { db: { condition: service_healthy } }
+    networks: [internal]
+networks: { internal: { internal: true }, edge: {} }
+secrets:
+  pg_super_password:  { file: ./secrets/pg_super_password }
+  pg_owner_password:  { file: ./secrets/pg_owner_password }
+  tb_app_password:    { file: ./secrets/tb_app_password }
+  tb_backup_password: { file: ./secrets/tb_backup_password }
+  database_url_owner: { file: ./secrets/database_url_owner }
+  database_url_app:   { file: ./secrets/database_url_app }
+  jwt_secret:         { file: ./secrets/jwt_secret }
+  audit_hmac_key:     { file: ./secrets/audit_hmac_key }
+  tls_fullchain:      { file: ./secrets/tls_fullchain }
+  tls_privkey:        { file: ./secrets/tls_privkey }
+volumes: { pgdata: {} }

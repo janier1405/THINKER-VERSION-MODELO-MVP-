@@ -1,0 +1,4 @@
+FROM postgres:16
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg && rm -rf /var/lib/apt/lists/*
+COPY scripts/backup.sh /usr/local/bin/backup.sh
+RUN chmod 755 /usr/local/bin/backup.sh

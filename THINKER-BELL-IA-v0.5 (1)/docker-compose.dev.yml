@@ -1,0 +1,22 @@
+# DESARROLLO (no usar en producción): PostgreSQL con superusuario y puertos locales, sin proxy ni secretos por archivo.
+# Uso: export POSTGRES_PASSWORD=<elige> JWT_SECRET=<48+ caracteres> AUDIT_HMAC_KEY=<48+ caracteres>; docker compose -f docker-compose.dev.yml up --build
+services:
+  db:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: thinkerbell, POSTGRES_DB: thinkerbell, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD}" }
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL","pg_isready -U thinkerbell"], interval: 5s, timeout: 3s, retries: 10 }
+  api:
+    build: .
+    command: sh -c "alembic upgrade head && uvicorn backend.app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      DATABASE_URL: "postgresql+psycopg://thinkerbell:${POSTGRES_PASSWORD}@db:5432/thinkerbell"
+      JWT_SECRET: "${JWT_SECRET:?define JWT_SECRET}"
+      AUDIT_HMAC_KEY: "${AUDIT_HMAC_KEY:?define AUDIT_HMAC_KEY}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:5173}"
+      COOKIE_SECURE: "false"
+      APP_ENV: "development"
+    depends_on: { db: { condition: service_healthy } }
+    ports: ["127.0.0.1:8000:8000"]
+volumes: { pgdata: {} }
